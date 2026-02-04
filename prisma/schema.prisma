@@ -34,12 +34,14 @@ model Session {
 }
 
 model MerchantConfig {
-  id                 Int      @id @default(autoincrement())
-  shop               String   @unique
-  oglobaMerchantId   String
-  oglobaApiKey       String
-  oglobaApiSecret    String
-  redemptionEnabled  Boolean  @default(true)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id          Int     @id @default(autoincrement())
+  shop        String  @unique
+  enabled     Boolean @default(true)
+
+  merchantId  String
+  apiKey      String
+  apiSecret   String
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
