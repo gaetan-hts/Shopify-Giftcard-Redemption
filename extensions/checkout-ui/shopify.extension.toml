@@ -10,14 +10,11 @@ name = "checkout-ui"
 handle = "checkout-ui"
 type = "ui_extension"
 uid = "fddfc370-27c7-c30f-4ee0-a927194e2accadefd40c"
-
-# Controls where in Shopify your extension will be injected,
-# and the file that contains your extension’s source code. Learn more:
-# https://shopify.dev/docs/api/checkout-ui-extensions/latest/extension-targets-overview
-
+api_version = "unstable"
 [[extensions.targeting]]
 module = "./src/GiftCardRedeem.tsx"
 target = "purchase.checkout.block.render"
+
 
 [extensions.capabilities]
 # Gives your extension access to directly query Shopify’s storefront API.

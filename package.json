@@ -27,7 +27,6 @@
     "@prisma/client": "^6.16.3",
     "@react-router/dev": "^7.12.0",
     "@react-router/fs-routes": "^7.12.0",
-    "@react-router/node": "^7.12.0",
     "@react-router/serve": "^7.12.0",
     "@shopify/app-bridge-react": "^4.2.4",
     "@shopify/polaris": "^13.9.5",
@@ -41,12 +40,13 @@
     "vite-tsconfig-paths": "^5.1.4"
   },
   "devDependencies": {
+    "@react-router/node": "^7.13.0",
     "@shopify/api-codegen-preset": "^1.2.0",
     "@shopify/polaris-types": "^1.0.1",
     "@types/eslint": "^9.6.1",
-    "@types/node": "^22.18.8",
-    "@types/react": "^18.3.25",
-    "@types/react-dom": "^18.3.7",
+    "@types/node": "^22.19.8",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.57.1",
@@ -58,7 +58,7 @@
     "graphql-config": "^5.1.1",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
-    "vite": "^6.3.6"
+    "vite": "^6.4.1"
   },
   "workspaces": [
     "extensions/*"
@@ -66,8 +66,5 @@
   "trustedDependencies": [
     "@shopify/plugin-cloudflare"
   ],
-  "overrides": {
-    "p-map": "^4.0.0"
-  },
   "author": "gaeta"
 }
