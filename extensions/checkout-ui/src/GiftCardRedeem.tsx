@@ -3,43 +3,58 @@ import {
   render,
   BlockStack,
   Button,
-  TextBlock,
   TextField,
   useExtensionApi,
 } from '@shopify/ui-extensions-react/checkout';
 
-const TARGET = 'purchase.checkout.block.render';
+render('purchase.checkout.block.render', () => <GiftCardRedeem />);
 
-// On garde le render pour Shopify
-render(TARGET, () => <GiftCardRedeem />);
-
-// On ajoute "export default" devant la fonction
 export default function GiftCardRedeem() {
-  const api = useExtensionApi<typeof TARGET>() as any;
-  
+  const api = useExtensionApi() as any;
   const [cardNumber, setCardNumber] = useState('');
-  const [pin, setPin] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleApply = () => {
-    if (api.ui?.toast) {
-      api.ui.toast.show('Mock OGLOBA gift card redeemed!');
+  const APP_URL = 'https://stood-finest-coleman-incoming.trycloudflare.com'; //edit when server restart and provide new url
+
+  const handleApply = async () => {
+    if (!cardNumber) return;
+    setLoading(true);
+
+    try {
+      // Use the Absolute URL here
+      const response = await fetch(`${APP_URL}/api/ogloba`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cardNumber }),
+      });
+
+      const data = await response.json();
+      const toast = api.ui?.toast;
+
+      if (data.success) {
+        toast?.show(`Success: ${data.message}`);
+      } else {
+        toast?.show(`Error: ${data.message}`);
+      }
+    } catch (error) {
+      console.error("Fetch error:", error);
+      api.ui?.toast?.show("Network error: Check tunnel URL");
+    } finally {
+      setLoading(false);
     }
   };
 
+
   return (
     <BlockStack spacing="base">
-      <TextBlock emphasis="bold">Redeem your OGLOBA Gift Card</TextBlock>
       <TextField 
-        label="Gift card number" 
+        label="OGLOBA Card Number" 
         value={cardNumber} 
-        onChange={(val: string) => setCardNumber(val)} 
+        onChange={setCardNumber} 
       />
-      <TextField 
-        label="PIN (if applicable)" 
-        value={pin} 
-        onChange={(val: string) => setPin(val)} 
-      />
-      <Button onPress={handleApply}>Apply</Button>
+      <Button onPress={handleApply} loading={loading}>
+        Apply
+      </Button>
     </BlockStack>
   );
 }
