@@ -15,6 +15,6 @@ network_access = true
 
 [extensions.capabilities.network_domains]
 allowed_domains = [
-  "https://stood-finest-coleman-incoming.trycloudflare.com",
+  "night-prepare-ben-waters.trycloudflare.com",
   "srl-ts.ogloba.com"
 ]

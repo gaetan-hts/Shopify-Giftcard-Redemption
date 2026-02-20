@@ -21,10 +21,10 @@
     "baseUrl": ".",
     "types": ["node"], 
     "skipLibCheck": true,
-    "moduleResolution": "Node", 
+    "moduleResolution": "Bundler", 
     "paths": {
       "~/*": ["./app/*"],
-      "vite/client": ["./node_modules/vite/client.d.ts"] 
+      "vite/client": ["./node_modules/vite/client.d.ts"]
     },
     "rootDirs": [".", "./.react-router/types"]
   }

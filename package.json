@@ -1,5 +1,6 @@
 {
   "name": "ogloba-giftcard-redemption",
+  "type": "module", 
   "private": true,
   "scripts": {
     "build": "react-router build",
@@ -19,7 +20,6 @@
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit"
   },
-  "type": "module",
   "engines": {
     "node": ">=20.19 <22 || >=22.12"
   },
