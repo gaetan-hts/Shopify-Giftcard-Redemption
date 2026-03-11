@@ -1,123 +1,109 @@
-import { type ActionFunctionArgs, type LoaderFunctionArgs } from "react-router";
+import { type ActionFunctionArgs } from "react-router";
 import shopify from "../shopify.server";
 import prisma from "../db.server";
 
-/**
- * CORS configuration to allow the Shopify Checkout UI Extension 
- * to communicate with this backend endpoint.
- */
+// ─── CORS Headers ────────────────────────────────────────────────────────────
+// Allow the Shopify checkout extension (cross-origin) to call this endpoint.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-/**
- * Loader Function
- * MANDATORY to handle CORS pre-flight "OPTIONS" requests.
- * Without this, the browser will block the POST request from the Checkout UI.
- */
+// Handle CORS preflight
 export const loader = async () => new Response(null, { status: 204, headers: corsHeaders });
 
-/**
- * Action Function: Handles Gift Card Redemption Cancellation
- * This endpoint is called when a user removes a gift card from their checkout.
- * It performs three main tasks:
- * 1. Notifies Ogloba to release the held funds.
- * 2. Deletes the generated discount code from Shopify.
- * 3. Updates the local database status.
- */
+// ─── Action: Cancel / Void a Gift Card Redemption ────────────────────────────
+// Called when the customer removes a gift card from the checkout UI,
+// or when the checkout is abandoned. Voids the Ogloba transaction so
+// the funds are returned to the gift card.
 export const action = async ({ request }: ActionFunctionArgs) => {
-  // Handle pre-flight request for browsers
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+
+  console.log("[CANCEL] Incoming cancel-redemption request...");
 
   try {
-    // Authenticate the request using the session token provided by the Checkout UI
+    // --- AUTH ---
+    // Validate the request comes from a legitimate Shopify checkout session.
     const { sessionToken } = await shopify.authenticate.public.checkout(request);
-    let shop = sessionToken.dest;
-    
-    // Extract the hostname (e.g., "myshop.myshopify.com") from the destination URL
-    if (shop.startsWith("http")) shop = new URL(shop).hostname;
+    const shop = sessionToken.dest.replace("https://", "");
+    console.log(`[CANCEL] Authenticated for shop: ${shop}`);
 
+    // --- PARSE BODY ---
     const { discountCode } = await request.json();
-    console.log("Attempting cancellation for code:", discountCode);
+    console.log(`[CANCEL] Discount code to void: ${discountCode}`);
 
-    // Look up the transaction in our database to find the associated Ogloba reference and Shopify ID
-    const transaction = await prisma.oglobaTransaction.findUnique({
-      where: { discountCode }
-    });
+    // --- DB LOOKUP ---
+    // Find the matching Ogloba transaction in our database.
+    const transaction = await prisma.oglobaTransaction.findUnique({ where: { discountCode } });
 
+    // If there's no record, or it was already voided, nothing to do — return success.
     if (!transaction) {
-      return new Response(JSON.stringify({ success: false, message: "Transaction not found" }), {
-        status: 404,
-        headers: corsHeaders
-      });
+      console.warn(`[CANCEL] No transaction found for code: ${discountCode}. Skipping.`);
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: corsHeaders });
     }
 
-    /**
-     * STEP 1: Ogloba API Cancellation
-     * We notify Ogloba that the transaction is cancelled so the 
-     * card balance is released or the "pending" hold is removed.
-     */
-    const oglobaResponse = await fetch("https://srl-ts.ogloba.com/gc-restful-gateway/giftCardService/cancelTransaction", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-WSRG-API-Version": "2.18",
-        "Authorization": `Basic ${process.env.OGLOBA_API_KEY}`
-      },
-      body: JSON.stringify({
-        merchantId: "TestOgloba",
-        terminalId: "demo",
-        cashierId: "Shopify",
-        referenceNumber: transaction.referenceNumber
-      })
-    });
+    if (transaction.status === "VOIDED") {
+      console.warn(`[CANCEL] Transaction ${discountCode} is already VOIDED. Skipping.`);
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: corsHeaders });
+    }
 
-    const oglobaData = await oglobaResponse.json();
-    console.log("📥 [OGLOBA CANCEL RESPONSE]:", JSON.stringify(oglobaData, null, 2));
+    console.log(`[CANCEL] Transaction found — ref: ${transaction.referenceNumber}, status: ${transaction.status}`);
 
-    /**
-     * STEP 2: Shopify Discount Deletion
-     * We remove the dynamic discount code from the Shopify store 
-     * so it can no longer be used by the customer.
-     * Note: 'deletedCodeDiscountId' is used here as per Shopify GraphQL API specifications.
-     */
-    const { admin } = await shopify.unauthenticated.admin(shop);
-    const deleteResponse = await admin.graphql(`#graphql
-      mutation discountCodeDelete($id: ID!) {
-        discountCodeDelete(id: $id) {
-          deletedCodeDiscountId
-          userErrors {
-            field
-            message
-          }
-        }
-      }`, 
-      { variables: { id: transaction.discountId } }
+    // --- STEP 1: VOID ON OGLOBA ─────────────────────────────────────────────
+    // Call Ogloba's voidTransaction endpoint to release the held funds
+    // back onto the customer's gift card.
+    console.log(`[CANCEL] [1/2] Calling Ogloba voidTransaction for ref: ${transaction.referenceNumber}`);
+
+    const ogRes = await fetch(
+      "https://dev.ogloba.com/gc-restful-gateway/giftCardService/voidTransaction",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-WSRG-API-Version": "2.7",
+          // Basic auth: base64("merchantId:apiKey")
+          Authorization: `Basic ${Buffer.from(`${process.env.OGLOBA_MERCHANT_ID}:${process.env.OGLOBA_API_KEY}`).toString("base64")}`,
+        },
+        body: JSON.stringify({
+          merchantId: process.env.OGLOBA_MERCHANT_ID,
+          terminalId: process.env.OGLOBA_TERMINAL_ID,
+          cashierId: process.env.OGLOBA_CASHIER_ID,
+          originalMerchantId: process.env.OGLOBA_MERCHANT_ID,
+          originalTerminalId: process.env.OGLOBA_TERMINAL_ID,
+          originalCashierId: process.env.OGLOBA_CASHIER_ID,
+          referenceNumber: transaction.referenceNumber,
+        }),
+      }
     );
 
-    /**
-     * STEP 3: Database Update
-     * Mark the transaction as 'CANCELLED' in our records for auditing.
-     */
+    const ogData = await ogRes.json();
+    console.log(`[CANCEL] [1/2] Ogloba voidTransaction response (HTTP ${ogRes.status}):`, JSON.stringify(ogData, null, 2));
+
+    if (!ogData.isSuccessful) {
+      throw new Error(`Ogloba void failed — errorCode: ${ogData.errorCode}, message: ${ogData.errorMessage || "No message"}`);
+    }
+
+    // --- STEP 2: UPDATE DB ──────────────────────────────────────────────────
+    // Mark the transaction as VOIDED so it cannot be voided again.
+    console.log(`[CANCEL] [2/2] Updating DB status to VOIDED for code: ${discountCode}`);
     await prisma.oglobaTransaction.update({
       where: { discountCode },
-      data: { status: "CANCELLED" }
+      data: { status: "VOIDED" },
     });
+    console.log(`[CANCEL] [2/2] DB update complete.`);
 
-    return new Response(JSON.stringify({ success: true }), { 
-      status: 200, 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
   } catch (error: any) {
-    console.error("Full cancellation error:", error);
-    return new Response(JSON.stringify({ success: false, error: error.message }), { 
-      status: 500, 
-      headers: corsHeaders 
+    console.error("[CANCEL] ❌ Error during cancel-redemption:", error.message);
+    console.error("[CANCEL] Stack:", error.stack);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 };

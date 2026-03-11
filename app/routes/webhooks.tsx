@@ -2,144 +2,173 @@ import { type ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
-/**
- * Webhook Handler
- * Process flow:
- * 1. Listen for 'orders/paid'
- * 2. Find any Ogloba discount codes used in that order
- * 3. Step 2 (Ogloba): Confirm Transaction
- * 4. Step 3 (Ogloba): Reconciliation
- */
+// ─── Action: Webhook — orders/paid ───────────────────────────────────────────
+// Triggered by Shopify when an order is successfully paid.
+// Flow:
+//   1. Validate the Shopify webhook signature (HMAC).
+//   2. Find any Ogloba gift card codes (prefixed "OGL-") used in the order.
+//   3. Call Ogloba Reconciliation to finalize the accounting for each code.
+//   4. Mark the transaction as RECONCILED in our DB.
 export const action = async ({ request }: ActionFunctionArgs) => {
-  console.log("--------------------------------------------------");
-  console.log("🔔 WEBHOOK RECEIVED: Start processing...");
+  console.log("─────────────────────────────────────────────");
+  console.log("🔔 [WEBHOOK] Received orders/paid event. Processing...");
 
-  // 1. CLONE THE REQUEST
-  // Because the authenticate.webhook(request) consumes the body stream,
-  // we clone it so we can read it again if auth fails (e.g., in local dev).
+  // Clone the request before authenticate.webhook() consumes the body stream,
+  // so we can re-read it manually in dev mode if HMAC validation fails.
   const clonedRequest = request.clone();
 
   let topic: string | null = null;
   let shop: string | null = null;
   let payload: any = null;
 
+  // --- STEP 1: VALIDATE WEBHOOK SIGNATURE ───────────────────────────────────
   try {
-    // 2. VALIDATE WEBHOOK SIGNATURE
     const auth = await authenticate.webhook(request);
     topic = auth.topic;
     shop = auth.shop;
     payload = auth.payload;
-    console.log("✅ Official Shopify authentication successful.");
+    console.log(`✅ [WEBHOOK] Auth successful — topic: ${topic} | shop: ${shop}`);
   } catch (error: any) {
-    console.error("⚠️ Official authentication failed (401).");
+    console.error("⚠️ [WEBHOOK] Official HMAC authentication failed:", error.message);
 
+    // In development, HMAC validation may fail when testing with tools like ngrok
+    // or manually triggered webhooks. We fall back to reading the raw payload.
     if (process.env.NODE_ENV === "development") {
-      // Manual extraction for local testing where signatures might mismatch
-      console.warn("🛠️ DEV MODE: Manual reading via clone...");
+      console.warn("🛠️ [WEBHOOK] DEV MODE: Falling back to manual payload extraction...");
       try {
         payload = await clonedRequest.json();
         topic = request.headers.get("x-shopify-topic");
         shop = request.headers.get("x-shopify-shop-domain");
+        console.log(`🛠️ [WEBHOOK] DEV: topic=${topic} | shop=${shop}`);
       } catch (manualError) {
+        console.error("❌ [WEBHOOK] Could not parse request body manually.");
         return new Response("Unreadable Request", { status: 400 });
       }
     } else {
+      // In production, reject unauthenticated webhooks
       return new Response("Unauthorized", { status: 401 });
     }
   }
 
-  // Normalize topic string (e.g., "orders/paid" -> "ORDERS_PAID")
+  // Normalize topic format: "orders/paid" → "ORDERS_PAID"
   const normalizedTopic = topic ? topic.toUpperCase().replace(/\//g, "_") : "";
 
   try {
     switch (normalizedTopic) {
-      case "ORDERS_PAID":
-        const discountCodes = payload.discount_codes || [];
-        
-        for (const discount of discountCodes) {
-          // Check if the discount code used in the order is one of our Ogloba codes
+      case "ORDERS_PAID": {
+        console.log(`[WEBHOOK] Processing order: ${payload.name} (ID: ${payload.id})`);
+
+        // --- STEP 2: FIND OGLOBA DISCOUNT CODES ────────────────────────────
+        // Filter for codes we created — all prefixed with "OGL-"
+        const oglobaCodes = (payload.discount_codes || []).filter((d: any) =>
+          d.code.startsWith("OGL-")
+        );
+
+        if (oglobaCodes.length === 0) {
+          console.log("[WEBHOOK] No Ogloba discount codes in this order. Nothing to do.");
+          return new Response(null, { status: 200 });
+        }
+
+        console.log(`[WEBHOOK] Found ${oglobaCodes.length} Ogloba code(s) to reconcile.`);
+
+        for (const discount of oglobaCodes) {
+          console.log(`[WEBHOOK] Looking up DB record for code: ${discount.code}`);
+
           const transaction = await prisma.oglobaTransaction.findUnique({
-            where: { discountCode: discount.code }
+            where: { discountCode: discount.code },
           });
 
-          if (transaction && transaction.status === "PENDING") {
-            try {
-              // --- STEP 2: CONFIRMATION ---
-              // Inform Ogloba that the transaction is finalized because payment was successful.
-              console.log(`🔄 Calling Ogloba Step 2 (Confirmation)...`);
-              const confirmResponse = await fetch("https://srl-ts.ogloba.com/gc-restful-gateway/giftCardService/confirmTransaction", {
-                method: "POST",
-                headers: { 
-                  "Content-Type": "application/json",
-                  "X-WSRG-API-Version": "2.18",
-                  "Authorization": `Basic ${process.env.OGLOBA_API_KEY}` 
-                },
-                body: JSON.stringify({
-                  merchantId: "TestOgloba",
-                  terminalId: "demo",
-                  cashierId: "Shopify",
-                  referenceNumber: transaction.referenceNumber
-                }),
-              });
+          // Only process transactions in CONFIRMED state.
+          // RECONCILED / VOIDED / EXPIRED_VOID are all terminal states — skip them.
+          if (!transaction || transaction.status !== "CONFIRMED") {
+            console.warn(
+              `[WEBHOOK] Skipping ${discount.code} — not found or status is not CONFIRMED (current: ${transaction?.status ?? "NOT FOUND"})`
+            );
+            continue;
+          }
 
-              const confirmData = await confirmResponse.json();
-              console.log("📥 [OGLOBA CONFIRMATION RESPONSE]:", JSON.stringify(confirmData, null, 2));
+          console.log(`[WEBHOOK] Transaction found — ref: ${transaction.referenceNumber}. Starting Ogloba reconciliation...`);
 
-              if (confirmData.isSuccessful) {
-                // --- STEP 3: RECONCILIATION ---
-                // Mandatory accounting step for Ogloba to clear the transaction record.
-                console.log(`🔄 Calling Ogloba Step 3 (Reconciliation)...`);
-                const reconcileResponse = await fetch("https://srl-ts.ogloba.com/gc-restful-gateway/giftCardService/reconciliation", {
-                  method: "POST",
-                  headers: { 
-                    "Content-Type": "application/json",
-                    "X-WSRG-API-Version": "2.18",
-                    "Authorization": `Basic ${process.env.OGLOBA_API_KEY}` 
-                  },
-                  body: JSON.stringify({
-                    merchantId: "TestOgloba",
-                    businessDate: new Date().toISOString().split('T')[0],
-                    reconciliationRecords: [{
-                      terminalTxNo: "1",
-                      lineCount: 1,
-                      terminalId: "demo",
-                      cashierId: "Shopify",
-                      transactionNumber: Date.now().toString().slice(-10),
-                      referenceNumber: transaction.referenceNumber,
-                      transactionType: "P",
-                      cardNumber: transaction.cardNumber,
-                      currency: "EUR",
-                      amount: parseFloat(transaction.amount.toString()),
-                      finalStatus: "N"
-                    }]
-                  }),
-                });
+          // --- STEP 3: RECONCILIATION ──────────────────────────────────────
+          // This is the final Ogloba accounting step that permanently deducts
+          // the gift card amount and closes out the transaction.
+          const businessDate = new Date()
+            .toISOString()
+            .split("T")[0]
+            .replace(/-/g, ""); // Format: YYYYMMDD
 
-                const reconcileData = await reconcileResponse.json();
-                console.log("📥 [OGLOBA RECONCILIATION RESPONSE]:", JSON.stringify(reconcileData, null, 2));
+          const reconciliationPayload = {
+            merchantId: process.env.OGLOBA_MERCHANT_ID,
+            businessDate,
+            reconciliationRecords: [
+              {
+                terminalTxNo: "1",
+                lineCount: 1,
+                terminalId: process.env.OGLOBA_TERMINAL_ID,
+                cashierId: process.env.OGLOBA_CASHIER_ID,
+                transactionNumber: Date.now().toString().slice(-10),
+                referenceNumber: transaction.referenceNumber,
+                transactionType: "P",  // P = Purchase/Payment
+                cardNumber: transaction.cardNumber,
+                currency: "EUR",
+                amount: parseFloat(transaction.amount.toString()),
+                finalStatus: "N",      // N = Normal (completed successfully)
+              },
+            ],
+          };
 
-                // Finalize local DB status
-                await prisma.oglobaTransaction.update({
-                  where: { id: transaction.id },
-                  data: { status: "CONFIRMED" }
-                });
-                console.log(`🏆 Total success for ${transaction.discountCode}`);
-              }
-            } catch (err) {
-              console.error("❌ Error during Ogloba API calls:", err);
+          console.log(`[WEBHOOK] Calling Ogloba reconciliation for ref: ${transaction.referenceNumber}`);
+          console.log(`[WEBHOOK] Payload:`, JSON.stringify(reconciliationPayload, null, 2));
+
+          const reconcileRes = await fetch(
+            "https://dev.ogloba.com/gc-restful-gateway/giftCardService/reconciliation",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-WSRG-API-Version": "2.7",
+                Authorization: `Basic ${Buffer.from(`${process.env.OGLOBA_MERCHANT_ID}:${process.env.OGLOBA_API_KEY}`).toString("base64")}`,
+              },
+              body: JSON.stringify(reconciliationPayload),
             }
+          );
+
+          const reconData = await reconcileRes.json();
+          console.log(
+            `[WEBHOOK] Ogloba reconciliation response for ${discount.code} (HTTP ${reconcileRes.status}):`,
+            JSON.stringify(reconData, null, 2)
+          );
+
+          // --- STEP 4: UPDATE DB ───────────────────────────────────────────
+          if (reconData.isSuccessful) {
+            await prisma.oglobaTransaction.update({
+              where: { id: transaction.id },
+              data: { status: "RECONCILED" },
+            });
+            console.log(`✅ [WEBHOOK] Reconciliation complete for ${discount.code}. DB updated to RECONCILED.`);
+          } else {
+            // Reconciliation failed — log for manual follow-up.
+            // Do NOT throw here; we still want to return 200 to Shopify
+            // so it doesn't retry the webhook unnecessarily.
+            console.error(
+              `❌ [WEBHOOK] Reconciliation failed for ${discount.code} — errorCode: ${reconData.errorCode}, message: ${reconData.errorMessage}`
+            );
           }
         }
         break;
+      }
 
       default:
-        console.warn(`❓ Unhandled topic: ${normalizedTopic}`);
+        console.warn(`❓ [WEBHOOK] Unhandled topic: ${normalizedTopic}`);
         break;
     }
 
+    console.log("─────────────────────────────────────────────");
     return new Response(null, { status: 200 });
+
   } catch (error: any) {
-    console.error("❌ Critical webhook error:", error.message);
-    return new Response("Error", { status: 500 });
+    console.error("❌ [WEBHOOK] Critical error during processing:", error.message);
+    console.error("[WEBHOOK] Stack:", error.stack);
+    return new Response("Internal Server Error", { status: 500 });
   }
 };

@@ -24,7 +24,7 @@ scopes = "write_discounts, write_products,read_orders"
 
 [auth]
 redirect_urls = [
-  "https://night-prepare-ben-waters.trycloudflare.com/auth/callback",
-  "https://night-prepare-ben-waters.trycloudflare.com/auth/shopify/callback",
-  "https://night-prepare-ben-waters.trycloudflare.com/api/auth"
+  "https://achievements-demands-deer-downtown.trycloudflare.com/auth/callback",
+  "https://achievements-demands-deer-downtown.trycloudflare.com/auth/shopify/callback",
+  "https://achievements-demands-deer-downtown.trycloudflare.com/api/auth"
 ]

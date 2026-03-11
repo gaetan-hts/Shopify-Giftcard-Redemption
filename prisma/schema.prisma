@@ -53,6 +53,7 @@ model OglobaTransaction {
   referenceNumber String   @unique
   cardNumber      String
   amount          Float
-  status          String   @default("PENDING") // PENDING, CONFIRMED, CANCELLED
+  status          String   @default("PENDING") // PENDING, CONFIRMED, VOIDED, RECONCILED, EXPIRED_VOID
+  expiresAt       DateTime @default(now())
   createdAt       DateTime @default(now())
 }
